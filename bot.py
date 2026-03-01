@@ -1,14 +1,26 @@
 import os
-import sqlite3
 import logging
 from telegram import Update
-from telegram.ext import ApplicationBuilder, MessageHandler, ContextTypes, filters
-from openai import OpenAI
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    filters,
+    ContextTypes,
+)
+import openai
 
-# ------------------------
-# Настройки
-# ------------------------
+# ---------------------------
+# Настройка логирования
+# ---------------------------
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
+# ---------------------------
+# Получение переменных окружения
+# ---------------------------
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
@@ -17,112 +29,51 @@ if not TELEGRAM_TOKEN:
 if not OPENAI_API_KEY:
     raise ValueError("OPENAI_API_KEY не установлен")
 
-client = OpenAI(api_key=OPENAI_API_KEY)
+openai.api_key = OPENAI_API_KEY
 
-logging.basicConfig(level=logging.INFO)
+# ---------------------------
+# Функции команд
+# ---------------------------
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Привет! Я готов работать!")
 
-# ------------------------
-# База данных
-# ------------------------
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Напиши мне любое сообщение, и я отвечу!")
 
-conn = sqlite3.connect("memory.db", check_same_thread=False)
-cursor = conn.cursor()
-
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS messages (
-    user_id INTEGER,
-    role TEXT,
-    text TEXT
-)
-""")
-conn.commit()
-
-MAX_MEMORY = 50
-CONTEXT_LIMIT = 10
-
-def save_message(user_id, role, text):
-    cursor.execute(
-        "INSERT INTO messages (user_id, role, text) VALUES (?, ?, ?)",
-        (user_id, role, text)
-    )
-    conn.commit()
-
-    # ограничение памяти
-    cursor.execute("""
-        DELETE FROM messages
-        WHERE user_id = ?
-        AND rowid NOT IN (
-            SELECT rowid FROM messages
-            WHERE user_id = ?
-            ORDER BY rowid DESC
-            LIMIT ?
-        )
-    """, (user_id, user_id, MAX_MEMORY))
-    conn.commit()
-
-
-def get_context(user_id):
-    cursor.execute("""
-        SELECT role, text FROM messages
-        WHERE user_id = ?
-        ORDER BY rowid DESC
-        LIMIT ?
-    """, (user_id, CONTEXT_LIMIT))
-
-    rows = cursor.fetchall()
-    rows.reverse()
-
-    messages = []
-    for role, text in rows:
-        messages.append({"role": role, "content": text})
-
-    return messages
-
-# ------------------------
-# Обработка сообщений
-# ------------------------
-
+# ---------------------------
+# Обработка текстовых сообщений
+# ---------------------------
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_message = update.message.text
+    await update.message.chat.send_action(action="typing")
+
     try:
-        user_id = update.message.from_user.id
-        user_text = update.message.text
-
-        # сохраняем сообщение пользователя
-        save_message(user_id, "user", user_text)
-
-        history = get_context(user_id)
-
-        # добавляем системную роль
-        messages = [
-            {"role": "system", "content": "Ты дружелюбный Telegram бот. Отвечай кратко и по делу."}
-        ] + history
-
-        response = client.chat.completions.create(
+        response = openai.ChatCompletion.create(
             model="gpt-4o-mini",
-            messages=messages,
-            temperature=0.7
+            messages=[{"role": "user", "content": user_message}],
+            temperature=0.7,
+            max_tokens=500,
         )
-
-        reply = response.choices[0].message.content
-
-        # сохраняем ответ бота
-        save_message(user_id, "assistant", reply)
-
-        await update.message.reply_text(reply)
-
+        answer = response.choices[0].message.content.strip()
+        await update.message.reply_text(answer)
     except Exception as e:
-        logging.error(f"Ошибка: {e}")
-        await update.message.reply_text("Произошла ошибка. Попробуй позже.")
+        logger.error(f"OpenAI error: {e}")
+        await update.message.reply_text("Произошла ошибка при обращении к серверу.")
 
-# ------------------------
-# Запуск
-# ------------------------
-
+# ---------------------------
+# Главная функция
+# ---------------------------
 def main():
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+
+    # Команды
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_command))
+
+    # Все текстовые сообщения
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    print("Bot started...")
+    logger.info("Бот запущен...")
     app.run_polling()
 
 if __name__ == "__main__":
