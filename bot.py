@@ -1,87 +1,109 @@
 import os
 import logging
 import openai
+from fastapi import FastAPI, Request
 from telegram import Update
 from telegram.ext import (
-    ApplicationBuilder,
+    Application,
     CommandHandler,
     MessageHandler,
     ContextTypes,
-    filters
+    filters,
 )
 
-# Логирование
+# =========================
+# ЛОГИ
+# =========================
 logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
 )
-
 logger = logging.getLogger(__name__)
 
-# Проверка переменных окружения
+# =========================
+# ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ
+# =========================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 if not TELEGRAM_TOKEN:
     raise ValueError("TELEGRAM_TOKEN не установлен")
+
 if not OPENAI_API_KEY:
     raise ValueError("OPENAI_API_KEY не установлен")
 
-# Настройка OpenAI
 openai.api_key = OPENAI_API_KEY
 
-# --- Функции бота ---
+# =========================
+# TELEGRAM APPLICATION
+# =========================
+application = Application.builder().token(TELEGRAM_TOKEN).build()
 
+# =========================
+# ФУНКЦИИ БОТА
+# =========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда /start"""
     await update.message.reply_text(
-        "Привет! Отправь мне любое сообщение, и я отвечу."
+        "Привет! Я бот на базе OpenAI. Напиши что-нибудь."
     )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда /help"""
     await update.message.reply_text(
-        "Просто напиши что-нибудь, и я отвечу!."
+        "Отправь любое сообщение, и я отвечу."
     )
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка текстовых сообщений"""
     user_text = update.message.text
+
     try:
         response = openai.ChatCompletion.create(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": user_text}],
             temperature=0.7,
-            max_tokens=500
+            max_tokens=500,
         )
-        answer = response['choices'][0]['message']['content']
-        await update.message.reply_text(answer)
+
+        answer = response.choices[0].message.content.strip()
+
     except Exception as e:
         logger.error(f"OpenAI API error: {e}")
-        await update.message.reply_text("Произошла ошибка при обработке запроса.")
+        answer = "Произошла ошибка при обращении к серверу."
+
+    await update.message.reply_text(answer)
 
 async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Для неизвестных команд"""
-    await update.message.reply_text("Извини, я не понимаю эту команду.")
+    await update.message.reply_text("Неизвестная команда.")
 
-# --- Основная функция запуска ---
+# =========================
+# РЕГИСТРАЦИЯ ХЕНДЛЕРОВ
+# =========================
+application.add_handler(CommandHandler("start", start))
+application.add_handler(CommandHandler("help", help_command))
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+application.add_handler(MessageHandler(filters.COMMAND, unknown))
 
-def main():
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+# =========================
+# FASTAPI
+# =========================
+app = FastAPI()
 
-    # Команды
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_command))
+@app.on_event("startup")
+async def on_startup():
+    await application.initialize()
+    await application.start()
 
-    # Сообщения
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    webhook_url = f"https://{os.environ['RENDER_EXTERNAL_HOSTNAME']}/webhook"
+    await application.bot.set_webhook(webhook_url)
 
-    # Неизвестные команды
-    app.add_handler(MessageHandler(filters.COMMAND, unknown))
+    logger.info(f"Webhook установлен: {webhook_url}")
 
-    # Запуск бота
-    logger.info("Бот запущен...")
-    app.run_polling()
+@app.post("/webhook")
+async def telegram_webhook(request: Request):
+    data = await request.json()
+    update = Update.de_json(data, application.bot)
+    await application.process_update(update)
+    return {"status": "ok"}
 
-if __name__ == "__main__":
-    main()
+@app.get("/")
+async def root():
+    return {"status": "Bot is running"}
