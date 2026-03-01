@@ -1,28 +1,21 @@
 import os
 import logging
-from telegram import Update
+from fastapi import FastAPI, Request
+from telegram import Update, Bot
 from telegram.ext import (
-    ApplicationBuilder,
+    Dispatcher,
     CommandHandler,
     MessageHandler,
     filters,
-    ContextTypes,
 )
 import openai
+import uvicorn
 
-# ---------------------------
-# Настройка логирования
-# ---------------------------
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
-)
-logger = logging.getLogger(__name__)
-
-# ---------------------------
-# Получение переменных окружения
-# ---------------------------
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+# =======================
+# Настройки
+# =======================
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 
 if not TELEGRAM_TOKEN:
     raise ValueError("TELEGRAM_TOKEN не установлен")
@@ -31,50 +24,63 @@ if not OPENAI_API_KEY:
 
 openai.api_key = OPENAI_API_KEY
 
-# ---------------------------
-# Функции команд
-# ---------------------------
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Привет! Я готов работать!")
+# Логирование
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Напиши мне любое сообщение, и я отвечу!")
+# =======================
+# Инициализация бота
+# =======================
+bot = Bot(token=TELEGRAM_TOKEN)
+dispatcher = Dispatcher(bot, None, workers=0)
 
-# ---------------------------
-# Обработка текстовых сообщений
-# ---------------------------
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_message = update.message.text
-    await update.message.chat.send_action(action="typing")
+# =======================
+# Хендлеры
+# =======================
+def start(update: Update, context):
+    update.message.reply_text("Привет! Я готов к работе.")
 
+def echo(update: Update, context):
+    """Отвечает через OpenAI на любое сообщение"""
+    user_text = update.message.text
     try:
         response = openai.ChatCompletion.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": user_message}],
+            model="gpt-3.5-turbo",
+            messages=[{"role": "user", "content": user_text}],
             temperature=0.7,
-            max_tokens=500,
+            max_tokens=300,
         )
-        answer = response.choices[0].message.content.strip()
-        await update.message.reply_text(answer)
+        reply = response.choices[0].message.content.strip()
     except Exception as e:
-        logger.error(f"OpenAI error: {e}")
-        await update.message.reply_text("Произошла ошибка при обращении к серверу.")
+        reply = f"Ошибка при обращении к OpenAI: {e}"
+    update.message.reply_text(reply)
 
-# ---------------------------
-# Главная функция
-# ---------------------------
-def main():
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+# Добавляем хендлеры
+dispatcher.add_handler(CommandHandler("start", start))
+dispatcher.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), echo))
 
-    # Команды
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_command))
+# =======================
+# FastAPI
+# =======================
+app = FastAPI()
 
-    # Все текстовые сообщения
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+@app.post(f"/webhook/{TELEGRAM_TOKEN}")
+async def telegram_webhook(req: Request):
+    data = await req.json()
+    update = Update.de_json(data, bot)
+    dispatcher.process_update(update)
+    return {"ok": True}
 
-    logger.info("Бот запущен...")
-    app.run_polling()
+@app.on_event("startup")
+async def set_webhook():
+    """Устанавливаем webhook при старте сервера"""
+    url = f"https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME')}/webhook/{TELEGRAM_TOKEN}"
+    logger.info(f"Setting webhook to {url}")
+    await bot.set_webhook(url)
 
+# =======================
+# Запуск локально (для разработки)
+# =======================
 if __name__ == "__main__":
-    main()
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("bot:app", host="0.0.0.0", port=port, log_level="info")
