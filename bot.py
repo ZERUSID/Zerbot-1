@@ -1,6 +1,5 @@
 import os
 import logging
-import openai
 from fastapi import FastAPI, Request
 from telegram import Update
 from telegram.ext import (
@@ -10,6 +9,7 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
+from openai import OpenAI
 
 # =========================
 # ЛОГИ
@@ -32,7 +32,8 @@ if not TELEGRAM_TOKEN:
 if not OPENAI_API_KEY:
     raise ValueError("OPENAI_API_KEY не установлен")
 
-openai.api_key = OPENAI_API_KEY
+# Новый клиент OpenAI (v2.x)
+client = OpenAI(api_key=OPENAI_API_KEY)
 
 # =========================
 # TELEGRAM APPLICATION
@@ -56,14 +57,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text
 
     try:
-        response = openai.ChatCompletion.create(
+        response = client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=[{"role": "user", "content": user_text}],
+            messages=[
+                {"role": "system", "content": "Ты полезный Telegram-бот."},
+                {"role": "user", "content": user_text}
+            ],
             temperature=0.7,
             max_tokens=500,
         )
 
-        answer = response.choices[0].message.content.strip()
+        answer = response.choices[0].message.content
 
     except Exception as e:
         logger.error(f"OpenAI API error: {e}")
